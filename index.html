@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Woodland Harvest - Solo TTRPG Game</title>
+<style>
+  body { margin:0; display:flex; justify-content:center; align-items:center; height:100vh; background:#0a140a; }
+  canvas { image-rendering:pixelated; border:2px solid #333; }
+  #instructions { position:absolute; top:10px; left:10px; color:#fff; font-family:monospace; font-size:12px; pointer-events:none; }
+</style>
+</head>
+<body>
+<canvas id="c" width="640" height="480"></canvas>
+<div id="instructions">WASD or arrows = move | H = harvest tree | B = place block (6 wood) | R = rest in house</div>
+<script>
+const TILE = 16;
+const SCALE = 3;
+const MAP_W = 240;
+const MAP_H = 160;
+const SPEED = 120;
+const VIEW_W = 640;
+const VIEW_H = 480;
+const WOOD_PER_BLOCK = 6;
+const HARVEST_RANGE = 50;
+const HARVEST_STA_COST = 6;
+const WOOD_PLANK_COLOR = "#8b5a2b";
+const BLOCK_HIGHLIGHT = "#c9a26b";
+const BLOCK_SEAM = "#5e3a1c";
+
+function makeRng(seed) {
+  let s = seed >>> 0;
+  return () => {
+    s = Math.imul(1664525, s) + 1013904223 >>> 0;
+    return s / 0xffffffff;
+  };
+}
+
+function generateMap() {
+  const rng = makeRng(0xdeadbeef);
+  const map = [];
+  for (let y = 0; y < MAP_H; y++) {
+    const row = [];
+    for (let x = 0; x < MAP_W; x++) {
+      row.push(rng() < 0.07 ? "f" : "g");
+    }
+    map.push(row);
+  }
+  return map;
+}
+
+const canvas = document.getElementById("c");
+const ctx = canvas.getContext("2d");
+const map = generateMap();
+let px = 12 * TILE + TILE / 2;
+let py = 12 * TILE + TILE / 2;
+let stepAnim = 0;
+let playerStamina = 100;
+const PLAYER_MAX_STAMINA = 100;
+const playerSkills = { Harvest: 20 };
+const SKILL_CAP = 75;
+
+function rollSkill(name) {
+  const current = playerSkills[name];
+  const roll = Math.floor(Math.random() * 100) + 1;
+  const success = roll <= current;
+  const improvement = success ? 5 : 0.5;
+  playerSkills[name] = Math.min(SKILL_CAP, current + improvement);
+  return { success, newValue: playerSkills[name] };
+}
+
+let inventory = { wood: 0 };
+const blocks = new Set();
+const trees = [];
+const treeRng = makeRng(0x7ee5);
+for (let i = 0; i < 150; i++) {
+  const tx = 1 + Math.floor(treeRng() * (MAP_W - 2));
+  const ty = 1 + Math.floor(treeRng() * (MAP_H - 2));
+  if (map[ty][tx] === "g" || map[ty][tx] === "f") trees.push({ tx, ty, alive: true });
+}
+
+let toastText = "";
+let toastUntil = 0;
+
+function showMessage(msg) {
+  toastText = msg;
+  toastUntil = Date.now() + 3000;
+}
+
+function harvestWood() {
+  let closest = null;
+  let bestD = Infinity;
+  for (const t of trees) {
+    if (!t.alive) continue;
+    const d = Math.hypot(t.tx * TILE + TILE / 2 - px, t.ty * TILE + TILE / 2 - py);
+    if (d < bestD && d < HARVEST_RANGE) {
+      bestD = d;
+      closest = t;
+    }
+  }
+  if (!closest) {
+    showMessage("Walk closer to a tree and press H again.");
+    return;
+  }
+  const result = rollSkill("Harvest");
+  playerStamina = Math.max(0, playerStamina - HARVEST_STA_COST);
+  if (result.success) {
+    const gained = 4 + Math.floor(Math.random() * 3);
+    inventory.wood += gained;
+    closest.alive = false;
+    showMessage(`Harvested ${gained} wood. Harvest skill now ${result.newValue}%.`);
+  } else {
+    showMessage(`Harvest failed. Harvest skill improved to ${result.newValue}%.`);
+  }
+}
+
+function placeBlock() {
+  if (inventory.wood < WOOD_PER_BLOCK) {
+    showMessage(`Need ${WOOD_PER_BLOCK} wood for one block. You have ${inventory.wood}.`);
+    return;
+  }
+  const tx = Math.floor(px / TILE);
+  const ty = Math.floor(py / TILE);
+  const key = `${tx},${ty}`;
+  if (blocks.has(key) || map[ty]?.[tx] === "w") {
+    showMessage("Cannot place block here.");
+    return;
+  }
+  blocks.add(key);
+  inventory.wood -= WOOD_PER_BLOCK;
+  showMessage(`Placed 1 wooden block. Wood left: ${inventory.wood}.`);
+}
+
+function tryRest() {
+  const ptx = Math.floor(px / TILE);
+  const pty = Math.floor(py / TILE);
+  let insideHouse = false;
+  for (let dy = -2; dy <= 2; dy++) {
+    for (let dx = -2; dx <= 2; dx++) {
+      if (blocks.has(`${ptx + dx},${pty + dy}`)) insideHouse = true;
+    }
+  }
+  if (insideHouse) {
+    playerStamina = Math.min(PLAYER_MAX_STAMINA, playerStamina + 70);
+    showMessage("You rested safely inside your house. Stamina recovered.");
+  } else {
+    showMessage("Find your built house to rest safely.");
+  }
+}
+
+const held = new Set();
+window.addEventListener("keydown", e => {
+  held.add(e.key);
+  if (e.key === "h" || e.key === "H") harvestWood();
+  if (e.key === "b" || e.key === "B") placeBlock();
+  if (e.key === "r" || e.key === "R") tryRest();
+});
+window.addEventListener("keyup", e => held.delete(e.key));
+
+function loop() {
+  ctx.clearRect(0, 0, VIEW_W, VIEW_H);
+
+  let dx = 0, dy = 0;
+  if (held.has("ArrowLeft") || held.has("a")) dx -= 1;
+  if (held.has("ArrowRight") || held.has("d")) dx += 1;
+  if (held.has("ArrowUp") || held.has("w")) dy -= 1;
+  if (held.has("ArrowDown") || held.has("s")) dy += 1;
+  if (dx !== 0 || dy !== 0) {
+    const len = Math.sqrt(dx * dx + dy * dy);
+    px += (dx / len) * SPEED * 0.016;
+    py += (dy / len) * SPEED * 0.016;
+    stepAnim += 0.016 * 8;
+    playerStamina = Math.max(0, playerStamina - 0.08);
+  }
+
+  const camX = Math.max(VIEW_W / SCALE / 2, Math.min(px, MAP_W * TILE - VIEW_W / SCALE / 2));
+  const camY = Math.max(VIEW_H / SCALE / 2, Math.min(py, MAP_H * TILE - VIEW_H / SCALE / 2));
+  const offX = Math.round(camX - VIEW_W / SCALE / 2);
+  const offY = Math.round(camY - VIEW_H / SCALE / 2);
+
+  ctx.save();
+  ctx.scale(SCALE, SCALE);
+
+  for (let ty = 0; ty < MAP_H; ty++) {
+    for (let tx = 0; tx < MAP_W; tx++) {
+      const sx = tx * TILE - offX;
+      const sy = ty * TILE - offY;
+      ctx.fillStyle = map[ty][tx] === "f" ? "#2d9c3a" : "#228722";
+      ctx.fillRect(sx, sy, TILE, TILE);
+    }
+  }
+
+  for (const t of trees) {
+    if (!t.alive) continue;
+    const sx = t.tx * TILE - offX;
+    const sy = t.ty * TILE - offY;
+    ctx.fillStyle = "#6b4a2a";
+    ctx.fillRect(sx + TILE / 2 - 2, sy + 6, 4, 10);
+    ctx.fillStyle = "#1e6e1e";
+    ctx.fillRect(sx + 1, sy, TILE - 2, 8);
+    ctx.fillStyle = "#2a8a2a";
+    ctx.fillRect(sx + 2, sy - 3, TILE - 4, 6);
+  }
+
+  for (const key of blocks) {
+    const [btx, bty] = key.split(",").map(Number);
+    const sx = btx * TILE - offX;
+    const sy = bty * TILE - offY;
+    ctx.fillStyle = WOOD_PLANK_COLOR;
+    ctx.fillRect(sx, sy, TILE, TILE);
+    ctx.fillStyle = BLOCK_HIGHLIGHT;
+    ctx.fillRect(sx + 1, sy + 1, TILE - 2, 3);
+    ctx.fillStyle = BLOCK_SEAM;
+    ctx.fillRect(sx, sy + TILE / 2 - 1, TILE, 1);
+    ctx.fillRect(sx + TILE / 2, sy, 1, TILE);
+  }
+
+  const pw = TILE - 2;
+  const ph = TILE - 2;
+  const prx = Math.round(px - pw / 2 - offX);
+  const pry = Math.round(py - ph / 2 - offY);
+  const bob = Math.sin(stepAnim) * 1.2;
+  ctx.fillStyle = "#ffd700";
+  ctx.fillRect(prx, pry - bob, pw, ph);
+  ctx.restore();
+
+  ctx.fillStyle = "rgba(0,0,0,0.5)";
+  ctx.fillRect(10, 10, 300, 80);
+  ctx.fillStyle = "#fff";
+  ctx.font = "12px monospace";
+  ctx.fillText(`Wood: ${inventory.wood}`, 20, 30);
+  ctx.fillText(`Stamina: ${Math.floor(playerStamina)}`, 20, 50);
+  ctx.fillText(`Harvest skill: ${playerSkills.Harvest}%`, 20, 70);
+
+  if (toastText && Date.now() < toastUntil) {
+    ctx.fillStyle = "rgba(0,0,0,0.8)";
+    ctx.fillRect(200, VIEW_H - 60, VIEW_W - 400, 40);
+    ctx.fillStyle = "#a8e0b0";
+    ctx.textAlign = "center";
+    ctx.fillText(toastText, VIEW_W / 2, VIEW_H - 35);
+    ctx.textAlign = "left";
+  }
+
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
